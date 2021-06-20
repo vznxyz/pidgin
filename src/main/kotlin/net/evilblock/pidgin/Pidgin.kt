@@ -69,9 +69,10 @@ class Pidgin(
 					try {
 						val breakAt = message.indexOf(';')
 						val messageId = message.substring(0, breakAt)
-						val messageData = gson.fromJson(message.substring(breakAt + 1, message.length), JsonObject::class.java)
 
 						if (listeners.containsKey(messageId)) {
+							val messageData = gson.fromJson(message.substring(breakAt + 1, message.length), JsonObject::class.java)
+
 							for (listener in listeners[messageId]!!) {
 								listener.method.invoke(listener.instance, messageData)
 							}

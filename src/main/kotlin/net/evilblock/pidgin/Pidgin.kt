@@ -1,38 +1,48 @@
 package net.evilblock.pidgin
 
-import net.evilblock.pidgin.morph.JsonMorph
 import net.evilblock.pidgin.message.Message
 import net.evilblock.pidgin.message.handler.IncomingMessageHandler
 import net.evilblock.pidgin.message.handler.MessageExceptionHandler
 import net.evilblock.pidgin.message.listener.MessageListener
 import net.evilblock.pidgin.message.listener.MessageListenerData
 import com.google.gson.*
-import java.util.ArrayList
 import java.util.concurrent.ForkJoinPool
 import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPubSub
 import java.lang.IllegalStateException
+import java.util.logging.Logger
 
 /**
  * A Jedis Pub/Sub implementation.
  */
-class Pidgin(private val channel: String, private val jedisPool: JedisPool, private val options: PidginOptions = PidginOptions()) {
+class Pidgin(
+	private val channel: String,
+	private val jedisPool: JedisPool,
+	private val gson: Gson,
+	private val options: PidginOptions
+) {
 
 	private var jedisPubSub: JedisPubSub? = null
-	private val messageListeners: MutableList<MessageListenerData> = ArrayList()
+	private val listeners: MutableMap<String, MutableList<MessageListenerData>> = hashMapOf()
+
+	var debug: Boolean = false
 
 	init {
 		setupPubSub()
 	}
 
+	fun close() {
+		if (jedisPubSub != null && jedisPubSub!!.isSubscribed) {
+			jedisPubSub!!.unsubscribe()
+		}
+
+		jedisPool.close()
+	}
+
 	@JvmOverloads
 	fun sendMessage(message: Message, exceptionHandler: MessageExceptionHandler? = null) {
 		try {
-			val jsonObject = JsonObject()
-			jsonObject.addProperty("messageId", message.id)
-			jsonObject.add("messageData", morph.fromObject(message.data))
-
-			jedisPool.resource.use { jedis -> jedis.publish(channel, jsonObject.toString()) }
+			jedisPool.resource.use { jedis -> jedis.publish(channel, message.id + ";" + gson.toJsonTree(message.data).toString()) }
 		} catch (e: Exception) {
 			exceptionHandler?.onException(e)
 		}
@@ -46,8 +56,8 @@ class Pidgin(private val channel: String, private val jedisPool: JedisPool, priv
 				}
 
 				val messageId = method.getDeclaredAnnotation(IncomingMessageHandler::class.java).id
-
-				messageListeners.add(MessageListenerData(messageListener, method, messageId))
+				listeners.putIfAbsent(messageId, arrayListOf())
+				listeners[messageId]!!.add(MessageListenerData(messageListener, method, messageId))
 			}
 		}
 	}
@@ -57,20 +67,20 @@ class Pidgin(private val channel: String, private val jedisPool: JedisPool, priv
 			override fun onMessage(channel: String, message: String) {
 				if (channel.equals(this@Pidgin.channel, ignoreCase = true)) {
 					try {
-						val messagePayload = parser.parse(message).asJsonObject
-						val messageId = messagePayload.get("messageId").asString
-						val messageData = messagePayload.get("messageData").asJsonObject
+						val breakAt = message.indexOf(';')
+						val messageId = message.substring(0, breakAt)
+						val messageData = gson.fromJson(message.substring(breakAt + 1, message.length), JsonObject::class.java)
 
-						for (data in messageListeners) {
-							if (data.id == messageId) {
-								data.method.invoke(data.instance, messageData)
+						if (listeners.containsKey(messageId)) {
+							for (listener in listeners[messageId]!!) {
+								listener.method.invoke(listener.instance, messageData)
 							}
 						}
 					} catch (e: JsonParseException) {
-						println("[Pidgin] Expected JSON message but could not parse message")
+						Logger.getGlobal().severe("[Pidgin] Failed to parse message into JSON")
 						e.printStackTrace()
 					} catch (e: Exception) {
-						println("[Pidgin] Failed to handle message")
+						Logger.getGlobal().severe("[Pidgin] Failed to handle message")
 						e.printStackTrace()
 					}
 				}
@@ -78,17 +88,12 @@ class Pidgin(private val channel: String, private val jedisPool: JedisPool, priv
 		}
 
 		if (options.async) {
-			ForkJoinPool.commonPool().execute { jedisPool.resource.use { jedis -> jedis.subscribe(jedisPubSub!!, channel) } }
+			ForkJoinPool.commonPool().execute {
+				jedisPool.resource.use { jedis -> jedis.subscribe(jedisPubSub!!, channel) }
+			}
 		} else {
 			jedisPool.resource.use { jedis -> jedis.subscribe(jedisPubSub!!, channel) }
 		}
-	}
-
-	companion object {
-
-		val parser = JsonParser()
-		val morph = JsonMorph()
-
 	}
 
 }

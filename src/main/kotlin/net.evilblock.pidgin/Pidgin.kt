@@ -55,7 +55,7 @@ class Pidgin(
 					throw IllegalStateException("First parameter should be of JsonObject type")
 				}
 
-				val messageId = method.getDeclaredAnnotation(IncomingMessageHandler::class.java).id
+				val messageId = method.getDeclaredAnnotation(IncomingMessageHandler::class.java).value
 				listeners.putIfAbsent(messageId, arrayListOf())
 				listeners[messageId]!!.add(MessageListenerData(messageListener, method, messageId))
 			}
